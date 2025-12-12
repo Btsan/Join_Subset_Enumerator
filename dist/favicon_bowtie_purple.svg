@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Transparent background -->
+  <rect width="64" height="64" fill="none" rx="10"/>
+  
+  <!-- Bowtie Join Operator (⋈) -->
+  <g transform="translate(32, 32)">
+    <!-- Left vertical line (light pink #FFCCCC) -->
+    <line x1="-13" y1="-15" x2="-13" y2="15" 
+          stroke="#FFCCCC" 
+          stroke-width="6" 
+          stroke-linecap="round"/>
+    
+    <!-- Right vertical line (light green #CCDDAA) -->
+    <line x1="13" y1="-15" x2="13" y2="15" 
+          stroke="#CCDDAA" 
+          stroke-width="6" 
+          stroke-linecap="round"/>
+    
+    <!-- Diagonal: top-left to bottom-right (light blue #CCEEFF) -->
+    <line x1="-13" y1="-15" x2="13" y2="15" 
+          stroke="#CCEEFF" 
+          stroke-width="6" 
+          stroke-linecap="round"/>
+    
+    <!-- Diagonal: top-right to bottom-left (SURPRISE! Light purple #E6CCFF) -->
+    <line x1="13" y1="-15" x2="-13" y2="15" 
+          stroke="#E6CCFF" 
+          stroke-width="6" 
+          stroke-linecap="round"/>
+  </g>
+</svg>
