@@ -1071,7 +1071,7 @@ class SubqueryGenerator {
   generateBaseTableQuery(table) {
     const predicates = this.classifier.getPredicatesForSubset([table]);
 
-    let sql = `SELECT * FROM ${this.renderTable(table)}`;
+    let sql = `SELECT COUNT(*) FROM ${this.renderTable(table)}`;
 
     const allPredicates = [...predicates.selections, ...predicates.complex];
     if (allPredicates.length > 0) {
@@ -1141,7 +1141,7 @@ class SubqueryGenerator {
     // Build FROM clause with JOINs
     // Strategy: Add tables by following original edges (not alphabetical order)
     const firstTable = subsetArray[0];
-    let sql = `SELECT * FROM ${this.renderTable(firstTable)}`;
+    let sql = `SELECT COUNT(*) FROM ${this.renderTable(firstTable)}`;
 
     // Track used predicates and table membership
     const usedJoinPredicates = new Set();
