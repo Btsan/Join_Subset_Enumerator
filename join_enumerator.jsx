@@ -1920,64 +1920,32 @@ export default function JoinEnumeratorApp() {
                           const subsetStr = formatSubset(plan.subset);
                           const isSelected = selectedPlan === planIndex;
 
-                          if (plan.left === null) {
-                            return (
-                              <div key={idx} className="space-y-2">
-                                <div
-                                  onClick={() => setSelectedPlan(isSelected ? null : planIndex)}
-                                  className={`${isSelected ? 'bg-green-100 border-green-600' : 'bg-gray-50 border-green-500'} border-l-4 px-3 py-2 rounded font-mono text-sm hover:bg-green-50 transition-colors cursor-pointer`}
-                                >
-                                  <div className="font-semibold">{planIndex}. {subsetStr}</div>
-                                </div>
-                                {isSelected && (
-                                  <div className="ml-4 bg-gray-900 text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
-                                    <pre className="whitespace-pre-wrap">{plan.sql}</pre>
-                                    {(plan.predicates.selections.length > 0 || plan.predicates.complex.length > 0) && (
-                                      <div className="mt-2 pt-2 border-t border-gray-700 text-gray-300 text-xs">
-                                        <div className="font-semibold text-yellow-400">Predicates Applied:</div>
-                                        {plan.predicates.selections.length > 0 && (
-                                          <div>• Selections: {plan.predicates.selections.length}</div>
-                                        )}
-                                        {plan.predicates.complex.length > 0 && (
-                                          <div>• Complex: {plan.predicates.complex.length}</div>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
+                          return (
+                            <div key={idx} className="space-y-2">
+                              <div
+                                onClick={() => setSelectedPlan(isSelected ? null : planIndex)}
+                                className={`${isSelected ? 'bg-green-100 border-green-600' : 'bg-gray-50 border-green-500'} border-l-4 px-3 py-2 rounded font-mono text-sm hover:bg-green-50 transition-colors cursor-pointer`}
+                              >
+                                <div className="font-semibold">{planIndex}. {subsetStr}</div>
                               </div>
-                            );
-                          } else {
-                            const leftStr = formatSubset(plan.left);
-                            const rightStr = formatSubset(plan.right);
-                            return (
-                              <div key={idx} className="space-y-2">
-                                <div
-                                  onClick={() => setSelectedPlan(isSelected ? null : planIndex)}
-                                  className={`${isSelected ? 'bg-purple-100 border-purple-600' : 'bg-gray-50 border-purple-500'} border-l-4 px-3 py-2 rounded font-mono text-sm hover:bg-purple-50 transition-colors cursor-pointer`}
-                                >
-                                  <div className="font-semibold">{planIndex}. {subsetStr} = {leftStr} ⋈ {rightStr}</div>
-                                </div>
-                                {isSelected && (
-                                  <div className="ml-4 bg-gray-900 text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
-                                    <pre className="whitespace-pre-wrap">{plan.sql}</pre>
+                              {isSelected && (
+                                <div className="ml-4 bg-gray-900 text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
+                                  <pre className="whitespace-pre-wrap">{plan.sql}</pre>
+                                  {(plan.predicates.selections.length > 0 || plan.predicates.complex.length > 0) && (
                                     <div className="mt-2 pt-2 border-t border-gray-700 text-gray-300 text-xs">
                                       <div className="font-semibold text-yellow-400">Predicates Applied:</div>
                                       {plan.predicates.selections.length > 0 && (
                                         <div>• Selections: {plan.predicates.selections.length}</div>
                                       )}
-                                      {plan.predicates.joins.length > 0 && (
-                                        <div>• Joins: {plan.predicates.joins.length}</div>
-                                      )}
                                       {plan.predicates.complex.length > 0 && (
                                         <div>• Complex: {plan.predicates.complex.length}</div>
                                       )}
                                     </div>
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          }
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
                         })}
                       </div>
                     );
