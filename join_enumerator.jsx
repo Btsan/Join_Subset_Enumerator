@@ -19,8 +19,6 @@ import React, { useState } from 'react';
  *    - Check connectivity via ECs
  *    - Find decomposition using DP table
  *    - Generate SQL with complete join conditions
- * 
- * See RESEARCH_DOCUMENTATION.md for detailed explanation of algorithms and design decisions.
  */
 
 // Join Graph Class with Equivalence Class Support
@@ -625,12 +623,14 @@ class PredicateClassifier {
     // 1. Parentheses (don't split inside parens)
     // 2. String literals (don't split inside quotes)
     // 3. Keywords in strings ('AND Corporation', 'OR gate')
+    // 4. BETWEEN...AND (don't split the AND that's part of BETWEEN)
 
     const predicates = [];
     let current = '';
     let parenDepth = 0;
     let inString = false;
     let stringChar = null;
+    let inBetween = false;  // Track if we're inside a BETWEEN clause
 
     for (let i = 0; i < clause.length; i++) {
       const char = clause[i];
@@ -647,15 +647,25 @@ class PredicateClassifier {
         } else if (char === ')') {
           parenDepth--;
           current += char;
+        } else if (parenDepth === 0 && remaining.startsWith('BETWEEN ')) {
+          // Entering a BETWEEN clause
+          inBetween = true;
+          current += char;
         } else if (parenDepth === 0 && remaining.startsWith('AND ')) {
           // Check if this is actually " AND " (not part of a longer word)
           const prevChar = i > 0 ? clause[i - 1] : ' ';
           if (/\s/.test(prevChar) || prevChar === ')') {
-            // This is a top-level AND separator
-            predicates.push(current.trim());
-            current = '';
-            i += 3; // Skip 'AND'
-            continue;
+            if (inBetween) {
+              // This is the AND in "BETWEEN x AND y" - don't split
+              inBetween = false;  // Reset flag after consuming the AND
+              current += char;
+            } else {
+              // This is a top-level AND separator - split here
+              predicates.push(current.trim());
+              current = '';
+              i += 3; // Skip 'AND'
+              continue;
+            }
           } else {
             // Part of a word like "ISLAND" or "LAND"
             current += char;
@@ -798,6 +808,8 @@ function addConstantEqualityJoins(joinGraph, classifier, tables) {
 // Returns {table, column, value} if predicate constrains to ONE value, null otherwise
 function extractSingleConstantValue(pred) {
   // Pattern 1: table.column = constant
+  // IMPORTANT: (?:\s|$) accepts EITHER space OR end-of-string
+  // This is correct - do not change to (?:\s+$) which would require space before end!
   const eqMatch = pred.match(/(\w+)\.(\w+)\s*=\s*(.+?)(?:\s|$)/);
   if (eqMatch) {
     const [_, table, column, rawValue] = eqMatch;
@@ -830,6 +842,258 @@ function normalizeValue(rawValue) {
     .replace(/['"]/g, '')      // Remove quotes
     .replace(/::.+$/, '')       // Remove type casts like ::timestamp
     .trim();
+}
+
+// Workload Analyzer - tracks table and column usage across queries
+class WorkloadAnalyzer {
+  constructor() {
+    this.tables = new Map(); // base_table -> { query_count, columns: Map }
+    this.query_count = 0;
+  }
+
+  analyzeQuery(tables, aliases, classifier, joinGraph) {
+    this.query_count++;
+
+    // Get base tables (resolve aliases)
+    const baseTables = new Set();
+    tables.forEach(alias => {
+      const baseTable = aliases.get(alias) || alias;
+      baseTables.add(baseTable);
+    });
+
+    // Track each base table (ignore self-joins - count once per query)
+    baseTables.forEach(baseTable => {
+      if (!this.tables.has(baseTable)) {
+        this.tables.set(baseTable, {
+          query_count: 0,
+          columns: new Map()
+        });
+      }
+
+      const tableData = this.tables.get(baseTable);
+      tableData.query_count++;
+    });
+
+    // Analyze columns from predicates
+    this.analyzeColumns(tables, aliases, classifier, joinGraph);
+  }
+
+  analyzeColumns(tables, aliases, classifier, joinGraph) {
+    // Get all table.column references from all predicates
+    const tableColumnRefs = this.extractAllTableColumnRefs(tables, classifier);
+
+    // Classify each table.column usage
+    tableColumnRefs.forEach(({ alias, column, predicate, predicateType }) => {
+      const baseTable = aliases.get(alias) || alias;
+
+      if (!this.tables.has(baseTable)) return;
+
+      const tableData = this.tables.get(baseTable);
+
+      if (!tableData.columns.has(column)) {
+        tableData.columns.set(column, {
+          query_count: 0,
+          join_count: 0,
+          equality_count: 0,
+          range_count: 0,
+          like_count: 0,
+          range_min: 'NA',
+          range_max: 'NA',
+          queries_seen: new Set()
+        });
+      }
+
+      const columnData = tableData.columns.get(column);
+
+      // Track which queries use this column (for query_count)
+      if (!columnData.queries_seen.has(this.query_count)) {
+        columnData.queries_seen.add(this.query_count);
+        columnData.query_count++;
+      }
+
+      // Classify usage
+      if (predicateType === 'join') {
+        columnData.join_count++;
+      } else if (predicateType === 'selection') {
+        // Further classify selection predicates
+        if (this.isRangePredicate(predicate)) {
+          columnData.range_count++;
+
+          // Extract and update range bounds
+          const bounds = this.extractRangeBounds(predicate, column);
+          this.updateRangeBounds(columnData, bounds.min, bounds.max);
+        } else if (this.isLikePredicate(predicate)) {
+          columnData.like_count++;
+        } else {
+          // Equality predicates (=, !=, IN, etc.)
+          columnData.equality_count++;
+        }
+      }
+    });
+  }
+
+  extractAllTableColumnRefs(tables, classifier) {
+    const refs = [];
+
+    // Get predicates for full query
+    const allPreds = classifier.getPredicatesForSubset(tables);
+
+    // Extract from join predicates
+    allPreds.joins.forEach(pred => {
+      const columns = this.extractColumnsFromExpression(pred);
+      columns.forEach(({ alias, column }) => {
+        refs.push({ alias, column, predicate: pred, predicateType: 'join' });
+      });
+    });
+
+    // Extract from selection predicates
+    allPreds.selections.forEach(pred => {
+      const columns = this.extractColumnsFromExpression(pred);
+      columns.forEach(({ alias, column }) => {
+        refs.push({ alias, column, predicate: pred, predicateType: 'selection' });
+      });
+    });
+
+    // Extract from complex predicates
+    allPreds.complex.forEach(pred => {
+      const columns = this.extractColumnsFromExpression(pred);
+      columns.forEach(({ alias, column }) => {
+        refs.push({ alias, column, predicate: pred, predicateType: 'complex' });
+      });
+    });
+
+    return refs;
+  }
+
+  extractColumnsFromExpression(expression) {
+    // Extract all table.column references using regex
+    // Handles: t.col, t1.col2, table_name.column_name
+    const pattern = /\b(\w+)\.(\w+)\b/g;
+    const columns = [];
+    let match;
+
+    while ((match = pattern.exec(expression)) !== null) {
+      columns.push({
+        alias: match[1],
+        column: match[2]
+      });
+    }
+
+    return columns;
+  }
+
+  isRangePredicate(predicate) {
+    // Check for range operators: <, >, <=, >=, BETWEEN
+    return /[<>]=?/.test(predicate) || /\bBETWEEN\b/i.test(predicate);
+  }
+
+  isLikePredicate(predicate) {
+    // Check for LIKE operators: LIKE, NOT LIKE, ILIKE, NOT ILIKE
+    return /\b(NOT\s+)?(I)?LIKE\b/i.test(predicate);
+  }
+
+  extractRangeBounds(predicate, column) {
+    const bounds = { min: 'NA', max: 'NA' };
+
+    // Escape column name for regex
+    const colPattern = column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Allow optional table prefix (e.g., n.column or just column)
+    const optionalPrefix = '(?:\\w+\\.)?';
+
+    // Pattern 1: col > value or col >= value
+    const greaterPattern = new RegExp(`${optionalPrefix}${colPattern}\\s*(>=?)\\s*([^\\s,)]+)`, 'i');
+    const greaterMatch = predicate.match(greaterPattern);
+    if (greaterMatch) {
+      bounds.min = this.normalizeValue(greaterMatch[2]);
+    }
+
+    // Pattern 2: col < value or col <= value
+    const lessPattern = new RegExp(`${optionalPrefix}${colPattern}\\s*(<=?)\\s*([^\\s,)]+)`, 'i');
+    const lessMatch = predicate.match(lessPattern);
+    if (lessMatch) {
+      bounds.max = this.normalizeValue(lessMatch[2]);
+    }
+
+    // Pattern 3: col BETWEEN x AND y
+    const betweenPattern = new RegExp(
+      `${optionalPrefix}${colPattern}\\s+BETWEEN\\s+([^\\s]+)\\s+AND\\s+([^\\s,)]+)`,
+      'i'
+    );
+    const betweenMatch = predicate.match(betweenPattern);
+    if (betweenMatch) {
+      bounds.min = this.normalizeValue(betweenMatch[1]);
+      bounds.max = this.normalizeValue(betweenMatch[2]);
+    }
+
+    return bounds;
+  }
+
+  normalizeValue(val) {
+    // Remove quotes and type casts
+    return val.trim()
+      .replace(/^['"]|['"]$/g, '')
+      .replace(/::\w+$/g, '')
+      .trim();
+  }
+
+  updateRangeBounds(columnData, newMin, newMax) {
+    // Update min (take the smaller value)
+    if (newMin !== 'NA') {
+      if (columnData.range_min === 'NA') {
+        columnData.range_min = newMin;
+      } else {
+        // String comparison (works for numbers, dates, strings)
+        columnData.range_min = newMin < columnData.range_min ? newMin : columnData.range_min;
+      }
+    }
+
+    // Update max (take the larger value)
+    if (newMax !== 'NA') {
+      if (columnData.range_max === 'NA') {
+        columnData.range_max = newMax;
+      } else {
+        // String comparison (works for numbers, dates, strings)
+        columnData.range_max = newMax > columnData.range_max ? newMax : columnData.range_max;
+      }
+    }
+  }
+
+  getSummary() {
+    // Convert Maps to plain objects for easier rendering
+    const tablesObj = {};
+
+    this.tables.forEach((tableData, tableName) => {
+      const columnsObj = {};
+
+      tableData.columns.forEach((columnData, columnName) => {
+        columnsObj[columnName] = {
+          query_count: columnData.query_count,
+          join_count: columnData.join_count,
+          equality_count: columnData.equality_count,
+          range_count: columnData.range_count,
+          like_count: columnData.like_count,
+          range_min: columnData.range_min,
+          range_max: columnData.range_max
+        };
+      });
+
+      tablesObj[tableName] = {
+        query_count: tableData.query_count,
+        columns: columnsObj
+      };
+    });
+
+    return {
+      summary: {
+        total_queries: this.query_count,
+        distinct_tables: this.tables.size,
+        distinct_columns: Array.from(this.tables.values())
+          .reduce((sum, t) => sum + t.columns.size, 0)
+      },
+      tables: tablesObj
+    };
+  }
 }
 
 function parseSQL(sql) {
@@ -1071,7 +1335,7 @@ class SubqueryGenerator {
   generateBaseTableQuery(table) {
     const predicates = this.classifier.getPredicatesForSubset([table]);
 
-    let sql = `SELECT COUNT(*) FROM ${this.renderTable(table)}`;
+    let sql = `SELECT * FROM ${this.renderTable(table)}`;
 
     const allPredicates = [...predicates.selections, ...predicates.complex];
     if (allPredicates.length > 0) {
@@ -1141,7 +1405,7 @@ class SubqueryGenerator {
     // Build FROM clause with JOINs
     // Strategy: Add tables by following original edges (not alphabetical order)
     const firstTable = subsetArray[0];
-    let sql = `SELECT COUNT(*) FROM ${this.renderTable(firstTable)}`;
+    let sql = `SELECT * FROM ${this.renderTable(firstTable)}`;
 
     // Track used predicates and table membership
     const usedJoinPredicates = new Set();
@@ -1312,6 +1576,7 @@ export default function JoinEnumeratorApp() {
   const [batchMode, setBatchMode] = useState(false);
   const [batchResults, setBatchResults] = useState(null);
   const [processingBatch, setProcessingBatch] = useState(false);
+  const [workloadAnalysis, setWorkloadAnalysis] = useState(null);
   const [showExamples, setShowExamples] = useState(false); // Hidden by default
 
   const enumerateJoins = () => {
@@ -1471,6 +1736,7 @@ export default function JoinEnumeratorApp() {
 
     setProcessingBatch(true);
     setBatchResults(null);
+    setWorkloadAnalysis(null);
     setError(null);
 
     try {
@@ -1482,6 +1748,7 @@ export default function JoinEnumeratorApp() {
       const allResults = [];
       let successCount = 0;
       let errorCount = 0;
+      const analyzer = new WorkloadAnalyzer();
 
       for (let i = 0; i < queries.length; i++) {
         const queryText = queries[i].trim().replace(/;+\s*$/, '');
@@ -1496,6 +1763,9 @@ export default function JoinEnumeratorApp() {
             errorCount++;
             continue;
           }
+
+          // Analyze workload
+          analyzer.analyzeQuery(tables, aliases, classifier, joinGraph);
 
           const enumerator = new PostgreSQLJoinEnumerator(tables, joinGraph);
           const allPlans = enumerator.enumerateAllValid();
@@ -1528,6 +1798,9 @@ export default function JoinEnumeratorApp() {
         errorCount,
         results: allResults
       });
+
+      // Set workload analysis
+      setWorkloadAnalysis(analyzer.getSummary());
 
     } catch (err) {
       setError(`Error reading file: ${err.message}`);
@@ -1607,7 +1880,7 @@ export default function JoinEnumeratorApp() {
         {/* Header */}
         <div className="bg-gradient-to-r from-purple-600 to-purple-800 text-white p-8 text-center">
           <h1 className="text-4xl font-bold mb-2">PostgreSQL Join Enumerator</h1>
-          <p className="text-lg opacity-90">Enumerate inner-join subsets for cardinality estimation</p>
+          <p className="text-lg opacity-90">Enumerate inner-join subsets</p>
         </div>
 
         {/* Content */}
@@ -1748,6 +2021,101 @@ export default function JoinEnumeratorApp() {
                           <div><strong>Joins Only:</strong> Only multi-table joins (for join cardinality estimation)</div>
                         </div>
                       </div>
+
+                      {/* Workload Analysis Section */}
+                      {workloadAnalysis && (
+                        <div className="mt-4 border-2 border-indigo-300 rounded-lg overflow-hidden">
+                          <div className="bg-indigo-600 text-white px-4 py-3 font-bold text-sm">
+                            📊 Workload Analysis
+                          </div>
+
+                          {/* Summary Statistics */}
+                          <div className="bg-indigo-50 p-4 grid grid-cols-3 gap-3 text-center border-b-2 border-indigo-200">
+                            <div>
+                              <div className="text-2xl font-bold text-indigo-900">
+                                {workloadAnalysis.summary.total_queries}
+                              </div>
+                              <div className="text-xs text-indigo-700">Total Queries</div>
+                            </div>
+                            <div>
+                              <div className="text-2xl font-bold text-indigo-900">
+                                {workloadAnalysis.summary.distinct_tables}
+                              </div>
+                              <div className="text-xs text-indigo-700">Distinct Tables</div>
+                            </div>
+                            <div>
+                              <div className="text-2xl font-bold text-indigo-900">
+                                {workloadAnalysis.summary.distinct_columns}
+                              </div>
+                              <div className="text-xs text-indigo-700">Distinct Columns</div>
+                            </div>
+                          </div>
+
+                          {/* Tables Section */}
+                          <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
+                            {Object.entries(workloadAnalysis.tables)
+                              .sort((a, b) => b[1].query_count - a[1].query_count)
+                              .map(([tableName, tableData]) => (
+                                <details key={tableName} className="border-2 border-indigo-200 rounded-lg">
+                                  <summary className="cursor-pointer bg-indigo-100 px-3 py-2 font-semibold text-indigo-900 hover:bg-indigo-200 transition-colors text-sm">
+                                    <span className="inline-block w-48 truncate align-middle">{tableName}</span>
+                                    <span className="text-xs text-indigo-700 ml-2">
+                                      (in {tableData.query_count} queries, {Object.keys(tableData.columns).length} cols)
+                                    </span>
+                                  </summary>
+
+                                  <div className="p-3 bg-white">
+                                    <div className="overflow-x-auto">
+                                      <table className="w-full text-xs border-collapse">
+                                        <thead>
+                                          <tr className="bg-indigo-50">
+                                            <th className="px-2 py-1 text-left border border-indigo-200 font-semibold">Column</th>
+                                            <th className="px-2 py-1 text-center border border-indigo-200 font-semibold">Queries</th>
+                                            <th className="px-2 py-1 text-center border border-indigo-200 font-semibold">Joins</th>
+                                            <th className="px-2 py-1 text-center border border-indigo-200 font-semibold">Equality</th>
+                                            <th className="px-2 py-1 text-center border border-indigo-200 font-semibold">Ranges</th>
+                                            <th className="px-2 py-1 text-center border border-indigo-200 font-semibold">LIKE</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {Object.entries(tableData.columns)
+                                            .sort((a, b) => b[1].query_count - a[1].query_count)
+                                            .map(([columnName, columnData]) => (
+                                              <tr key={columnName} className="hover:bg-indigo-50">
+                                                <td className="px-2 py-1 border border-indigo-200 font-mono">{columnName}</td>
+                                                <td className="px-2 py-1 text-center border border-indigo-200">{columnData.query_count}</td>
+                                                <td className={`px-2 py-1 text-center border border-indigo-200 ${columnData.join_count > 0 ? 'bg-green-100 font-semibold' : ''}`}>
+                                                  {columnData.join_count > 0 ? columnData.join_count : '-'}
+                                                </td>
+                                                <td className={`px-2 py-1 text-center border border-indigo-200 ${columnData.equality_count > 0 ? 'bg-blue-100 font-semibold' : ''}`}>
+                                                  {columnData.equality_count > 0 ? columnData.equality_count : '-'}
+                                                </td>
+                                                <td className={`px-2 py-1 text-center border border-indigo-200 font-mono text-xs ${columnData.range_count > 0 ? 'bg-purple-100 font-semibold' : ''}`}>
+                                                  {columnData.range_count > 0 ? `${columnData.range_count} [${columnData.range_min}–${columnData.range_max}]` : '-'}
+                                                </td>
+                                                <td className={`px-2 py-1 text-center border border-indigo-200 ${columnData.like_count > 0 ? 'bg-yellow-100 font-semibold' : ''}`}>
+                                                  {columnData.like_count > 0 ? columnData.like_count : '-'}
+                                                </td>
+                                              </tr>
+                                            ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+
+                                    <div className="mt-2 pt-2 border-t border-indigo-200 text-xs text-indigo-700">
+                                      <div className="flex gap-4">
+                                        <div><span className="inline-block w-3 h-3 bg-green-100 border border-green-300 mr-1"></span>Join key</div>
+                                        <div><span className="inline-block w-3 h-3 bg-blue-100 border border-blue-300 mr-1"></span>Equality (=, !=, IN)</div>
+                                        <div><span className="inline-block w-3 h-3 bg-purple-100 border border-purple-300 mr-1"></span>Range (&lt;, &gt;, BETWEEN)</div>
+                                        <div><span className="inline-block w-3 h-3 bg-yellow-100 border border-yellow-300 mr-1"></span>LIKE pattern</div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </details>
+                              ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </>
@@ -1920,32 +2288,64 @@ export default function JoinEnumeratorApp() {
                           const subsetStr = formatSubset(plan.subset);
                           const isSelected = selectedPlan === planIndex;
 
-                          return (
-                            <div key={idx} className="space-y-2">
-                              <div
-                                onClick={() => setSelectedPlan(isSelected ? null : planIndex)}
-                                className={`${isSelected ? 'bg-green-100 border-green-600' : 'bg-gray-50 border-green-500'} border-l-4 px-3 py-2 rounded font-mono text-sm hover:bg-green-50 transition-colors cursor-pointer`}
-                              >
-                                <div className="font-semibold">{planIndex}. {subsetStr}</div>
+                          if (plan.left === null) {
+                            return (
+                              <div key={idx} className="space-y-2">
+                                <div
+                                  onClick={() => setSelectedPlan(isSelected ? null : planIndex)}
+                                  className={`${isSelected ? 'bg-green-100 border-green-600' : 'bg-gray-50 border-green-500'} border-l-4 px-3 py-2 rounded font-mono text-sm hover:bg-green-50 transition-colors cursor-pointer`}
+                                >
+                                  <div className="font-semibold">{planIndex}. {subsetStr}</div>
+                                </div>
+                                {isSelected && (
+                                  <div className="ml-4 bg-gray-900 text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
+                                    <pre className="whitespace-pre-wrap">{plan.sql}</pre>
+                                    {(plan.predicates.selections.length > 0 || plan.predicates.complex.length > 0) && (
+                                      <div className="mt-2 pt-2 border-t border-gray-700 text-gray-300 text-xs">
+                                        <div className="font-semibold text-yellow-400">Predicates Applied:</div>
+                                        {plan.predicates.selections.length > 0 && (
+                                          <div>• Selections: {plan.predicates.selections.length}</div>
+                                        )}
+                                        {plan.predicates.complex.length > 0 && (
+                                          <div>• Complex: {plan.predicates.complex.length}</div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
-                              {isSelected && (
-                                <div className="ml-4 bg-gray-900 text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
-                                  <pre className="whitespace-pre-wrap">{plan.sql}</pre>
-                                  {(plan.predicates.selections.length > 0 || plan.predicates.complex.length > 0) && (
+                            );
+                          } else {
+                            const leftStr = formatSubset(plan.left);
+                            const rightStr = formatSubset(plan.right);
+                            return (
+                              <div key={idx} className="space-y-2">
+                                <div
+                                  onClick={() => setSelectedPlan(isSelected ? null : planIndex)}
+                                  className={`${isSelected ? 'bg-purple-100 border-purple-600' : 'bg-gray-50 border-purple-500'} border-l-4 px-3 py-2 rounded font-mono text-sm hover:bg-purple-50 transition-colors cursor-pointer`}
+                                >
+                                  <div className="font-semibold">{planIndex}. {subsetStr} = {leftStr} ⋈ {rightStr}</div>
+                                </div>
+                                {isSelected && (
+                                  <div className="ml-4 bg-gray-900 text-green-400 p-3 rounded font-mono text-xs overflow-x-auto">
+                                    <pre className="whitespace-pre-wrap">{plan.sql}</pre>
                                     <div className="mt-2 pt-2 border-t border-gray-700 text-gray-300 text-xs">
                                       <div className="font-semibold text-yellow-400">Predicates Applied:</div>
                                       {plan.predicates.selections.length > 0 && (
                                         <div>• Selections: {plan.predicates.selections.length}</div>
                                       )}
+                                      {plan.predicates.joins.length > 0 && (
+                                        <div>• Joins: {plan.predicates.joins.length}</div>
+                                      )}
                                       {plan.predicates.complex.length > 0 && (
                                         <div>• Complex: {plan.predicates.complex.length}</div>
                                       )}
                                     </div>
-                                  )}
-                                </div>
-                              )}
-                            </div>
-                          );
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }
                         })}
                       </div>
                     );
@@ -1963,7 +2363,7 @@ export default function JoinEnumeratorApp() {
                       Total: {results.allPlans.length} unique subsets
                     </div>
                     <div className="text-xs text-blue-700 mt-2 italic">
-                      💡 Click any subset to view its SQL subquery.
+                      💡 Each subset shown once with one valid join decomposition. Click any subset to view its SQL subquery.
                     </div>
                   </div>
                 </div>
