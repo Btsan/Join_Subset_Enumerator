@@ -19,6 +19,8 @@ import React, { useState } from 'react';
  *    - Check connectivity via ECs
  *    - Find decomposition using DP table
  *    - Generate SQL with complete join conditions
+ * 
+ * See RESEARCH_DOCUMENTATION.md for detailed explanation of algorithms and design decisions.
  */
 
 // Join Graph Class with Equivalence Class Support
@@ -2052,7 +2054,7 @@ export default function JoinEnumeratorApp() {
                           </div>
 
                           {/* Tables Section */}
-                          <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
+                          <div className="p-4 space-y-3 max-h-[800px] overflow-y-auto">
                             {Object.entries(workloadAnalysis.tables)
                               .sort((a, b) => b[1].query_count - a[1].query_count)
                               .map(([tableName, tableData]) => (
