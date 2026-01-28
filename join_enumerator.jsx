@@ -502,6 +502,57 @@ class PredicateClassifier {
   }
 
   classifyPredicates() {
+    // Extract JOIN ON predicates first
+    // Pattern: JOIN table_name alias ON condition
+    const joinOnPattern = /JOIN\s+([\w.]+)(?:\s+AS)?\s+(\w+)\s+ON\s+(.+?)(?=\s*(?:JOIN|WHERE|GROUP BY|ORDER BY|LIMIT|$))/gis;
+    let match;
+    while ((match = joinOnPattern.exec(this.sql)) !== null) {
+      const onClause = match[3].trim();
+
+      // Split ON clause by AND (in case multiple conditions)
+      const onPredicates = this.splitByAnd(onClause);
+
+      for (let pred of onPredicates) {
+        pred = pred.trim();
+        if (!pred) continue;
+
+        const tables = this.extractTablesFromPredicate(pred);
+
+        // Check if it's a join predicate (equality between two tables)
+        const joinMatch = pred.match(/(\w+)\.(\w+)\s*(=|==)\s*(\w+)\.(\w+)/);
+
+        if (joinMatch && tables.size === 2) {
+          // Join predicate from ON clause
+          const leftTable = joinMatch[1];
+          const leftCol = joinMatch[2];
+          const rightTable = joinMatch[4];
+          const rightCol = joinMatch[5];
+
+          this.joinPredicates.push({
+            tables: new Set([leftTable, rightTable]),
+            predicate: pred,
+            leftTable,
+            leftCol,
+            rightTable,
+            rightCol
+          });
+        } else if (tables.size === 1) {
+          // Selection predicate in ON clause (unusual but valid)
+          const table = Array.from(tables)[0];
+          if (!this.selectionPredicates[table]) {
+            this.selectionPredicates[table] = [];
+          }
+          this.selectionPredicates[table].push(pred);
+        } else if (tables.size > 1) {
+          // Complex predicate in ON clause
+          this.complexPredicates.push({
+            tables: tables,
+            predicate: pred
+          });
+        }
+      }
+    }
+
     // Extract WHERE clause
     const whereMatch = this.sql.match(/WHERE\s+(.*?)(?:GROUP BY|ORDER BY|LIMIT|$)/is);
     if (!whereMatch) return;
@@ -1337,7 +1388,7 @@ class SubqueryGenerator {
   generateBaseTableQuery(table) {
     const predicates = this.classifier.getPredicatesForSubset([table]);
 
-    let sql = `SELECT * FROM ${this.renderTable(table)}`;
+    let sql = `SELECT COUNT(*) FROM ${this.renderTable(table)}`;
 
     const allPredicates = [...predicates.selections, ...predicates.complex];
     if (allPredicates.length > 0) {
@@ -1407,7 +1458,7 @@ class SubqueryGenerator {
     // Build FROM clause with JOINs
     // Strategy: Add tables by following original edges (not alphabetical order)
     const firstTable = subsetArray[0];
-    let sql = `SELECT * FROM ${this.renderTable(firstTable)}`;
+    let sql = `SELECT COUNT(*) FROM ${this.renderTable(firstTable)}`;
 
     // Track used predicates and table membership
     const usedJoinPredicates = new Set();
@@ -2123,6 +2174,7 @@ export default function JoinEnumeratorApp() {
                 </>
               )}
 
+
               {/* Examples */}
               <div className="mt-6">
                 <div className="flex justify-between items-center mb-3">
@@ -2155,7 +2207,6 @@ export default function JoinEnumeratorApp() {
               </div>
             </div>
           </div>
-
           {/* Results Panel */}
           <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">
             <h2 className="text-2xl font-bold text-gray-800 mb-4 pb-2 border-b-2 border-purple-600">
