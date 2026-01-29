@@ -503,10 +503,13 @@ class PredicateClassifier {
 
   classifyPredicates() {
     // Extract JOIN ON predicates first
-    // Pattern: JOIN table_name alias ON condition
-    const joinOnPattern = /JOIN\s+([\w.]+)(?:\s+AS)?\s+(\w+)\s+ON\s+(.+?)(?=\s*(?:JOIN|WHERE|GROUP BY|ORDER BY|LIMIT|$))/gis;
+    // Pattern: [INNER|LEFT|RIGHT|FULL] [OUTER] JOIN table_name [AS] [alias] ON condition
+    // Alias is optional - if not provided, table name is used as alias
+    const joinOnPattern = /(?:INNER|LEFT|RIGHT|FULL|CROSS)?\s*(?:OUTER\s+)?JOIN\s+([\w.]+)(?:\s+(?:AS\s+)?(\w+))?\s+ON\s+(.+?)(?=\s*(?:(?:INNER|LEFT|RIGHT|FULL|CROSS)?\s*(?:OUTER\s+)?JOIN|WHERE|GROUP BY|ORDER BY|LIMIT|$))/gis;
     let match;
     while ((match = joinOnPattern.exec(this.sql)) !== null) {
+      const tableName = match[1];
+      const alias = match[2] || match[1]; // Use table name as alias if not provided
       const onClause = match[3].trim();
 
       // Split ON clause by AND (in case multiple conditions)
@@ -2174,7 +2177,6 @@ export default function JoinEnumeratorApp() {
                 </>
               )}
 
-
               {/* Examples */}
               <div className="mt-6">
                 <div className="flex justify-between items-center mb-3">
@@ -2207,6 +2209,7 @@ export default function JoinEnumeratorApp() {
               </div>
             </div>
           </div>
+
           {/* Results Panel */}
           <div className="bg-gray-50 rounded-lg p-6 border border-gray-200">
             <h2 className="text-2xl font-bold text-gray-800 mb-4 pb-2 border-b-2 border-purple-600">
