@@ -1401,92 +1401,35 @@ class SubqueryGenerator {
     return sql + ';';
   }
 
-  // Helper: Find best next table to add to JOIN tree (prioritizes original edges)
-  findNextTableForJoinTree(addedTables, remainingTables) {
-    let bestTable = null;
-    let bestJoinPred = null;
+  generateJoinQuery(subset, left, right) {
+    const subsetArray = Array.from(subset).sort();
 
-    // Try to find a table that has an original join to the current tree
-    for (let table of remainingTables) {
-      const joinPreds = this.findJoinPredicates(Array.from(addedTables), [table]);
+    // Build FROM clause with comma-separated tables (implicit join syntax)
+    const fromClause = subsetArray.map(table => this.renderTable(table)).join(', ');
+    let sql = `SELECT COUNT(*) FROM ${fromClause}`;
 
-      // Look for original join first
-      const originalJoin = joinPreds.find(p => p.isOriginal);
-      if (originalJoin) {
-        return { table, joinPred: originalJoin }; // Found original, use immediately
-      }
+    // Collect ALL predicates: joins + selections + complex
+    const allPredicates = [];
 
-      // Track first available join (transitive) as fallback
-      if (!bestJoinPred && joinPreds.length > 0) {
-        bestTable = table;
-        bestJoinPred = joinPreds[0];
-      }
-    }
-
-    return bestTable ? { table: bestTable, joinPred: bestJoinPred } : null;
-  }
-
-  // Helper: Build WHERE clause with selection predicates and unused join predicates
-  buildWhereClause(subsetArray, usedJoinPredicates) {
-    // Find ALL join predicates between tables in this subset
-    const allJoinPredicates = [];
+    // Get all join predicates between tables in this subset
     for (let i = 0; i < subsetArray.length; i++) {
       for (let j = i + 1; j < subsetArray.length; j++) {
         const preds = this.findJoinPredicates([subsetArray[i]], [subsetArray[j]]);
         for (let pred of preds) {
-          allJoinPredicates.push(pred.predicate);
+          allPredicates.push(pred.predicate);
         }
       }
     }
 
-    // Collect all predicates: selections + unused joins
+    // Get selection and complex predicates
     const predicates = this.classifier.getPredicatesForSubset(subsetArray);
-    const allPredicates = [...predicates.selections, ...predicates.complex];
+    allPredicates.push(...predicates.selections);
+    allPredicates.push(...predicates.complex);
 
-    // Add unused join predicates (additional constraints)
-    for (let joinPred of allJoinPredicates) {
-      if (!usedJoinPredicates.has(joinPred)) {
-        allPredicates.push(joinPred);
-      }
+    // Add WHERE clause with all predicates
+    if (allPredicates.length > 0) {
+      sql += '\nWHERE ' + allPredicates.join('\n  AND ');
     }
-
-    return allPredicates.length > 0
-      ? '\nWHERE ' + allPredicates.join('\n  AND ')
-      : '';
-  }
-
-  generateJoinQuery(subset, left, right) {
-    const subsetArray = Array.from(subset).sort();
-
-    // Build FROM clause with JOINs
-    // Strategy: Add tables by following original edges (not alphabetical order)
-    const firstTable = subsetArray[0];
-    let sql = `SELECT COUNT(*) FROM ${this.renderTable(firstTable)}`;
-
-    // Track used predicates and table membership
-    const usedJoinPredicates = new Set();
-    const addedTables = new Set([firstTable]);
-    const remainingTables = new Set(subsetArray.slice(1));
-
-    // Build JOIN tree by following original edges when possible
-    while (remainingTables.size > 0) {
-      const next = this.findNextTableForJoinTree(addedTables, remainingTables);
-
-      if (!next) break; // No more joinable tables
-
-      sql += `\nJOIN ${this.renderTable(next.table)}`;
-
-      if (next.joinPred) {
-        sql += ' ON ' + next.joinPred.predicate;
-        usedJoinPredicates.add(next.joinPred.predicate);
-      }
-
-      addedTables.add(next.table);
-      remainingTables.delete(next.table);
-    }
-
-    // Add WHERE clause with selections and unused join predicates
-    sql += this.buildWhereClause(subsetArray, usedJoinPredicates);
 
     return sql + ';';
   }
@@ -2191,6 +2134,7 @@ export default function JoinEnumeratorApp() {
 
                 {showExamples && (
                   <div className="space-y-2">
+                    <div className="text-xs text-gray-600 font-semibold mb-1">Transitive Joins:</div>
                     {[
                       { key: 'job_light_69', label: 'JOB-light 69' },
                       { key: 'stats_ceb_67', label: 'Stats-CEB 67' },
